@@ -9,8 +9,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from dotenv import load_dotenv
-
-import database as db  # Файл database.py должен быть в той же папке
+import database as db
+import os
 
 # Настройка логирования для отслеживания событий в консоли
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +30,7 @@ ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")
 class AddPlace(StatesGroup):
     waiting_for_name = State()
     waiting_for_type = State()
+    waiting_for_line = State()
     waiting_for_metro = State()
     waiting_for_address = State()
     waiting_for_photo = State()
@@ -38,14 +39,15 @@ class AddPlace(StatesGroup):
 class SearchStates(StatesGroup):
     waiting_for_category = State()
     waiting_for_budget = State()
+    waiting_for_line = State()
     waiting_for_metro = State()
     waiting_for_cuisine = State() # Только для ресторанов
 
 # --- МЕНЮ ---
 def main_menu():
     builder = ReplyKeyboardBuilder()
-    builder.row(types.KeyboardButton(text="🔍 Поиск"), types.KeyboardButton(text="⭐ Избранное"))
-    builder.row(types.KeyboardButton(text="➕ Добавить новое место"))
+    builder.row(types.KeyboardButton(text="🔍 Выбрать заведение"), types.KeyboardButton(text="⭐ Избранное"))
+    builder.row(types.KeyboardButton(text="➕ Предложить новое место"))
     return builder.as_markup(resize_keyboard=True)
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
@@ -53,11 +55,14 @@ def main_menu():
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     # Регистрируем пользователя в БД
-    db.register_user(
-        user_id=message.from_user.id,
-        username=message.from_user.username,
-        full_name=message.from_user.full_name
+    # Обязательно добавьте await в начале строки
+    await db.register_user(
+    user_id=message.from_user.id,
+    username=message.from_user.username,
+    full_name=message.from_user.full_name
     )
+
+
     
     logging.info(f"Пользователь {message.from_user.id} зарегистрирован и нажал start")
     await message.answer(
@@ -65,9 +70,9 @@ async def start_handler(message: types.Message):
         reply_markup=main_menu()
     )
 
-# 1. Нажатие на главную кнопку "Поиск"
+# 1. Нажатие на главную кнопку "🔍 Выбрать заведение"
 # 1. Шаг: Выбор категории (Ресторан / Кофейня)
-@dp.message(F.text == "🔍 Поиск")
+@dp.message(F.text == "🔍 Выбрать заведение")
 async def search_start(message: types.Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="🍴 Рестораны", callback_data="search_restaurant"))
@@ -83,38 +88,104 @@ async def choose_category(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(category=category)
     
     builder = InlineKeyboardBuilder()
-    builder.add(types.InlineKeyboardButton(text="$ (Дешево)", callback_data="budget_1"))
-    builder.add(types.InlineKeyboardButton(text="$$ (Средне)", callback_data="budget_2"))
-    builder.add(types.InlineKeyboardButton(text="$$$ (Дорого)", callback_data="budget_3"))
+    builder.add(types.InlineKeyboardButton(text="$ Низкий", callback_data="budget_1"))
+    builder.add(types.InlineKeyboardButton(text="$$ Средний", callback_data="budget_2"))
+    builder.add(types.InlineKeyboardButton(text="$$$ Высокий", callback_data="budget_3"))
     builder.add(types.InlineKeyboardButton(text="Пропустить ➡️", callback_data="budget_skip"))
     
+    builder.adjust(1)
+
     await state.set_state(SearchStates.waiting_for_budget)
     await callback.message.edit_text("Выбери бюджет:", reply_markup=builder.as_markup())
     await callback.answer()
 
-# --- ШАГ 3: ВЫБОР МЕТРО (КНОПКАМИ ИЗ БД) ---
+
+# --- ШАГ 3: ВЫБОР ВЕТКИ МЕТРО (КНОПКАМИ ИЗ БД) ---
+# Четко указываем состояние ожидания бюджета
 @dp.callback_query(SearchStates.waiting_for_budget)
-async def choose_budget(callback: types.CallbackQuery, state: FSMContext):
-    # Сохраняем выбранный бюджет
-    budget = None if "skip" in callback.data else int(callback.data.split("_")[1])
-    await state.update_data(budget=budget)
+async def choose_budget_and_ask_line(callback: types.CallbackQuery, state: FSMContext):
+    # Логируем для проверки в консоли, что бот зашел в функцию
+    print(f"--- ПОЛУЧЕН CALLBACK БЮДЖЕТА: {callback.data} ---")
     
-    # 1. Тянем динамический список станций из БД
-    stations = db.get_all_metro() 
-    
+    # Безопасный разбор callback_data (например, если кнопка имеет вид "budget_1")
+    try:
+        if "skip" in callback.data:
+            budget = None
+        else:
+            # Разбиваем строку "budget_1" по знаку подчеркивания и берем вторую часть
+            budget = int(callback.data.split("_")[1])
+        
+        await state.update_data(budget=budget)
+        print(f"Успешно сохранен бюджет: {budget}")
+    except Exception as e:
+        print(f"❌ Ошибка при разборе бюджета: {e}. Проверьте callback_data ваших кнопок!")
+        await callback.answer("Ошибка обработки кнопки", show_alert=True)
+        return
+
+    # Запрашиваем уникальные ветки из БД
+    lines = await asyncio.to_thread(db.get_unique_lines)
+    print(f"Получены ветки из БД: {lines}")
+
+    if not lines:
+        await callback.message.answer("Ошибка: не удалось загрузить ветки метро из базы данных.")
+        await callback.answer()
+        return
+
     builder = InlineKeyboardBuilder()
-    for s in stations:
-        # Важно: используем ID из базы для callback_data
+    for line in lines:
         builder.add(types.InlineKeyboardButton(
-            text=s['name'], 
-            callback_data=f"metro_{s['id']}"
+            text=f"🚇 {line} линия", 
+            callback_data=f"line_{line}"  # Передаем цвет ветки
         ))
     
     builder.add(types.InlineKeyboardButton(text="Везде 🌍", callback_data="metro_skip"))
-    builder.adjust(2) 
+    builder.adjust(1)  # Вертикальный столбик
+
+    # Переводим пользователя в состояние ожидания ВЕТКИ
+    await state.set_state(SearchStates.waiting_for_line)
     
+    # Меняем текст на экране
+    await callback.message.edit_text("Выберите ветку метро:", reply_markup=builder.as_markup())
+    
+    # Обязательно закрываем часы анимации на кнопке Telegram
+    await callback.answer()
+
+
+# --- ШАГ 4: ВЫБОР СТАНЦИИ МЕТРО (ПОСЛЕ НАЖАТИЯ НА ЦВЕТ ВЕТКИ) ---
+# Этот хэндлер ловит callback_data, которая начинается на "line_"
+@dp.callback_query(SearchStates.waiting_for_line, lambda c: c.data and c.data.startswith("line_"))
+async def choose_line_and_ask_metro(callback: types.CallbackQuery, state: FSMContext):
+    # Добавим логи, чтобы видеть, на какую ветку нажал пользователь
+    print(f"--- ПОЛУЧЕН CALLBACK ВЕТКИ: {callback.data} ---")
+    
+    # Вытаскиваем цвет ветки из callback_data (например, из "line_Красная" получаем "Красная")
+    selected_line = callback.data.replace("line_", "")
+    
+    # Запрашиваем из БД станции ТОЛЬКО этой ветки
+    stations = await asyncio.to_thread(db.get_metro_by_line, selected_line)
+    print(f"Получены станции для ветки {selected_line}: {stations}")
+
+    if not stations:
+        await callback.message.answer(f"Ошибка: на {selected_line} линии пока нет станций в БД.")
+        await callback.answer()
+        return
+
+    builder = InlineKeyboardBuilder()
+    # Строим кнопки для каждой станции этой ветки
+    for s in stations:
+        builder.add(types.InlineKeyboardButton(
+            text=s['name'],
+            callback_data=f"metro_{s['id']}" # Передаем ID станции
+        ))
+    
+    # Станций на одной ветке немного (около 15), их можно выводить по 2 в ряд
+    builder.adjust(2) 
+
+    # Переводим пользователя в состояние ожидания конкретной станции
     await state.set_state(SearchStates.waiting_for_metro)
-    await callback.message.edit_text("Выбери район (метро):", reply_markup=builder.as_markup())
+    
+    # Меняем текст на экране
+    await callback.message.edit_text(f"Станции линии ({selected_line}):", reply_markup=builder.as_markup())
     await callback.answer()
 
 # --- ШАГ 4: КУХНЯ (КНОПКАМИ ИЗ БД) ---
@@ -260,80 +331,71 @@ async def show_favorites_handler(message: types.Message):
         else:
             await message.answer(text, parse_mode="HTML")
 
-# Добавить новое заведение
-# 1. Начало: спрашиваем Название
-@dp.message(F.text == "➕ Добавить новое место")
+# --- СЦЕНАРИЙ: ДОБАВЛЕНИЕ МЕСТА ---
+
+@dp.message(F.text == "➕ Предложить новое место")
 async def add_place_start(message: types.Message, state: FSMContext):
     await state.set_state(AddPlace.waiting_for_name)
     await message.answer("Напиши название заведения:", reply_markup=ReplyKeyboardRemove())
 
-# 2. Получили название, спрашиваем Тип
 @dp.message(AddPlace.waiting_for_name)
 async def add_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
-    
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="Ресторан", callback_data="set_type_rest"))
     builder.add(types.InlineKeyboardButton(text="Кофейня", callback_data="set_type_cafe"))
-    
     await state.set_state(AddPlace.waiting_for_type)
-    await message.answer(f"Принято: {message.text}. Это ресторан или кофейня?", reply_markup=builder.as_markup())
+    await message.answer("Это ресторан или кофейня?", reply_markup=builder.as_markup())
 
-# 3. Выбрали тип, предлагаем Метро (кнопками)
 @dp.callback_query(AddPlace.waiting_for_type)
 async def add_type(callback: types.CallbackQuery, state: FSMContext):
+    # Сохраняем техническое имя для БД
     res_type = "restaurant" if callback.data == "set_type_rest" else "cafe"
     await state.update_data(category=res_type)
     
+    # Теперь вместо ввода текста предлагаем выбрать метро из списка
     stations = db.get_all_metro()
     builder = InlineKeyboardBuilder()
     for s in stations:
         builder.add(types.InlineKeyboardButton(text=s['name'], callback_data=f"addmetro_{s['id']}"))
     
     builder.adjust(2)
+    
     await state.set_state(AddPlace.waiting_for_metro)
     await callback.message.edit_text("Выбери ближайшее метро из списка:", reply_markup=builder.as_markup())
     await callback.answer()
 
-# 4. Выбрали метро, спрашиваем АДРЕС (вот тут была ошибка)
 @dp.callback_query(AddPlace.waiting_for_metro)
 async def add_metro_callback(callback: types.CallbackQuery, state: FSMContext):
-    # Находим название метро по ID для превью, либо просто сохраняем ID
     metro_id = int(callback.data.replace("addmetro_", ""))
     await state.update_data(metro_id=metro_id)
     
-    # ПЕРЕХОДИМ К АДРЕСУ
-    await state.set_state(AddPlace.waiting_for_address)
-    await callback.message.answer("Введите точный адрес заведения:")
+    # После метро спрашиваем название (текстом)
+    await state.set_state(AddPlace.waiting_for_name)
+    await callback.message.answer("Введите название заведения:")
     await callback.answer()
 
-# 5. Получили адрес, просим Фото
 @dp.message(AddPlace.waiting_for_address)
 async def add_address(message: types.Message, state: FSMContext):
     await state.update_data(address=message.text)
     await state.set_state(AddPlace.waiting_for_photo)
-    await message.answer("Пришли фото заведения:")
+    await message.answer("Пришли одно фото заведения:")
 
-# 6. Получили фото, выводим проверку данных
 @dp.message(AddPlace.waiting_for_photo, F.photo)
 async def add_photo(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     await state.update_data(photo_id=photo_id)
-    
     data = await state.get_data()
-    
-    # Для превью можно достать имя метро из БД, если нужно
     preview = (
         f"<b>Проверь данные:</b>\n\n"
         f"📍 Название: {data['name']}\n"
-        f"📁 Тип: {'Ресторан' if data['category'] == 'restaurant' else 'Кофейня'}\n"
+        f"📁 Тип: {data['category']}\n"
+        f"🚇 Метро: {data['metro']}\n"
         f"🏠 Адрес: {data['address']}"
     )
-    
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="✅ Отправить админу", callback_data="confirm_send"))
     builder.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add"))
-    
     await state.set_state(AddPlace.waiting_for_confirm)
     await message.answer_photo(photo=photo_id, caption=preview, parse_mode="HTML", reply_markup=builder.as_markup())
 
@@ -341,40 +403,18 @@ async def add_photo(message: types.Message, state: FSMContext):
 async def send_to_admin(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.clear()
-    
-    # 1. Достаем название метро по ID из БД, чтобы админу было понятно
-    metro_id = data.get('metro_id')
-    metro_name = "Не указано"
-    
-    if metro_id:
-        # Делаем быстрый запрос к таблице метро
-        res = db.supabase.table("metro_stations").select("name").eq("id", metro_id).single().execute()
-        if res.data:
-            metro_name = res.data['name']
-
-    # 2. Формируем текст для админа
     admin_text = (
         f"🔔 <b>НОВАЯ ЗАЯВКА</b>\nОт: @{callback.from_user.username}\n\n"
-        f"📍 Название: {data.get('name')}\n"
-        f"📁 Тип: {'Ресторан' if data.get('category') == 'restaurant' else 'Кофейня'}\n"
-        f"🚇 Метро: {metro_name}\n" # Теперь здесь название, а не ID
-        f"🏠 Адрес: {data.get('address')}"
+        f"📍 Название: {data['name']}\n"
+        f"📁 Тип: {data['category']}\n"
+        f"🚇 Метро: {data['metro']}\n"
+        f"🏠 Адрес: {data['address']}"
     )
-    
     admin_kb = InlineKeyboardBuilder()
     admin_kb.add(types.InlineKeyboardButton(text="✅ Одобрить", callback_data="admin_approve"))
     admin_kb.add(types.InlineKeyboardButton(text="❌ Отклонить", callback_data="admin_decline"))
     
-    # 3. Отправляем админу
-    await bot.send_photo(
-        chat_id=ADMIN_GROUP_ID, 
-        photo=data['photo_id'], 
-        caption=admin_text, 
-        parse_mode="HTML", 
-        reply_markup=admin_kb.as_markup()
-    )
-    
-    # 4. Ответ пользователю
+    await bot.send_photo(chat_id=ADMIN_GROUP_ID, photo=data['photo_id'], caption=admin_text, parse_mode="HTML", reply_markup=admin_kb.as_markup())
     await callback.message.edit_caption(caption="✅ Заявка отправлена модератору!", reply_markup=None)
     await callback.message.answer("Главное меню:", reply_markup=main_menu())
     await callback.answer()
@@ -391,54 +431,24 @@ async def cancel_add(callback: types.CallbackQuery, state: FSMContext):
 async def process_approve(callback: types.CallbackQuery):
     if str(callback.message.chat.id) != str(ADMIN_GROUP_ID):
         return
-    
     text = callback.message.caption
     try:
-        # 1. Извлекаем текстовые данные из сообщения админа с помощью регулярных выражений
+        # Извлекаем данные для сохранения в БД
         name = re.search(r"Название: (.+)", text).group(1).strip()
         cat_raw = re.search(r"Тип: (.+)", text).group(1).strip()
         category = "restaurant" if "Ресторан" in cat_raw else "cafe"
-        metro_name = re.search(r"Метро: (.+)", text).group(1).strip()
+        metro = re.search(r"Метро: (.+)", text).group(1).strip()
         address = re.search(r"Адрес: (.+)", text).group(1).strip()
         photo_id = callback.message.photo[-1].file_id
 
-        # 2. ВАЖНО: Находим ID станции метро по её названию
-        # Это нужно, так как в таблицу places мы записываем metro_id (число)
-        metro_res = db.supabase.table("metro_stations").select("id").eq("name", metro_name).single().execute()
-        
-        if not metro_res.data:
-            await callback.answer(f"Ошибка: Станция '{metro_name}' не найдена в справочнике!", show_alert=True)
-            return
-            
-        metro_id = metro_res.data['id']
-
-        # 3. Сохраняем в базу (теперь передаем metro_id)
-        db.insert_new_place(
-            category=category, 
-            name=name, 
-            metro_id=metro_id, 
-            address=address, 
-            photo_url=photo_id  # В нашей логике это photo_id из Telegram
-        )
-        
-        await callback.message.edit_caption(
-            caption=text + f"\n\n✅ ОДОБРЕНО: @{callback.from_user.username}", 
-            reply_markup=None
-        )
-        await callback.answer("Заведение успешно добавлено в базу!")
-        
+        db.insert_new_place(category, name, metro, address, photo_id)
+        await callback.message.edit_caption(caption=text + f"\n\n✅ ОДОБРЕНО: @{callback.from_user.username}", reply_markup=None)
     except Exception as e:
-        logging.error(f"Ошибка при одобрении: {e}")
         await callback.answer(f"Ошибка БД: {e}", show_alert=True)
 
 @dp.callback_query(F.data == "admin_decline")
 async def process_decline(callback: types.CallbackQuery):
-    # Просто обновляем текст, помечая отказ
-    await callback.message.edit_caption(
-        caption=callback.message.caption + f"\n\n❌ ОТКЛОНЕНО: @{callback.from_user.username}", 
-        reply_markup=None
-    )
-    await callback.answer("Заявка отклонена")
+    await callback.message.edit_caption(caption=callback.message.caption + "\n\n❌ ОТКЛОНЕНО", reply_markup=None)
 
 # Эхо-обработчик (ловит всё, что не попало в фильтры выше)
 @dp.message()
@@ -450,6 +460,7 @@ async def main():
     # drop_pending_updates=True позволит боту не отвечать на старые сообщения при запуске
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     try:

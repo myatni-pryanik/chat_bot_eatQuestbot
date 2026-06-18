@@ -1,6 +1,8 @@
 import os
+import asyncio
 from dotenv import load_dotenv
 from supabase import create_client, Client
+
 
 # Загружаем переменные окружения из .env
 load_dotenv()
@@ -12,17 +14,26 @@ key: str = os.getenv("SUPABASE_KEY")
 if not url or not key:
     print("❌ ОШИБКА: SUPABASE_URL или SUPABASE_KEY не найдены в .env")
 
+
+os.environ["HTTP_PROXY"] = "socks5://127.0.0.1:10808"
+os.environ["HTTPS_PROXY"] = "socks5://127.0.0.1:10808"
 supabase: Client = create_client(url, key)
 
-def register_user(user_id: int, username: str, full_name: str):
+
+async def register_user(user_id: int, username: str, full_name: str):
     """Регистрирует пользователя в базе, если его там еще нет"""
     data = {
         "user_id": user_id,
         "username": username,
         "first_name": full_name
     }
-    # upsert обновит данные, если ID уже есть, или создаст новую строку
-    supabase.table("users").upsert(data).execute()
+    
+    # Запускаем синхронный .execute() в отдельном потоке, чтобы aiogram не ругался
+    def run_sync():
+        return supabase.table("users").upsert(data).execute()
+        
+    await asyncio.to_thread(run_sync)
+
 
 def get_places(category: str, budget: int = None, metro_id: int = None, cuisine_id: int = None):
     """Получает список заведений по категории и фильтрам"""
@@ -47,6 +58,27 @@ def get_places(category: str, budget: int = None, metro_id: int = None, cuisine_
 # Функции для получения списков для кнопок в боте
 def get_all_metro():
     return supabase.table("metro_stations").select("*").execute().data
+
+def get_unique_lines():
+    """Возвращает список всех уникальных веток метро из БД"""
+    try:
+        response = supabase.table("metro_stations").select("line").execute()
+        # Собираем уникальные названия веток, исключая пустые (NULL), и сортируем
+        lines = sorted(list(set(row['line'] for row in response.data if row.get('line'))))
+        return lines
+    except Exception as e:
+        print(f"❌ Ошибка получения веток: {e}")
+        return []
+
+def get_metro_by_line(line_name: str):
+    """Возвращает список станций, принадлежащих конкретной ветке"""
+    try:
+        response = supabase.table("metro_stations").select("id, name").eq("line", line_name).execute()
+        return response.data
+    except Exception as e:
+        print(f"❌ Ошибка получения станций ветки: {e}")
+        return []
+
 
 def get_all_cuisines():
     return supabase.table("cuisines").select("*").execute().data
@@ -76,9 +108,12 @@ def get_favorites(user_id: int):
 def insert_new_place(category, name, metro_id, address, photo_url):
     """Вставляет новое заведение (после одобрения админом)"""
     try:
-        # Убираем лишний cat_map, если из бота уже летит 'restaurant'
+        # В базе 'Ресторан' должен стать 'restaurant', а 'Кофейня' -> 'cafe'
+        cat_map = {"Ресторан": "restaurant", "Кофейня": "cafe"}
+        db_category = cat_map.get(category, category.lower())
+
         data = {
-            "category": category,
+            "category": db_category,
             "name": name,
             "metro_id": metro_id,
             "address": address,
@@ -87,7 +122,7 @@ def insert_new_place(category, name, metro_id, address, photo_url):
             "rating_cache": 0.0
         }
         supabase.table("places").insert(data).execute()
-        print(f"✅ Заведение {name} добавлено.")
+        print(f"✅ Заведение {name} успешно добавлено в базу.")
     except Exception as e:
-        print(f"❌ Ошибка при вставке: {e}")
+        print(f"❌ Ошибка при вставке в базу: {e}")
         raise e
