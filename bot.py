@@ -55,7 +55,6 @@ def main_menu():
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     # Регистрируем пользователя в БД
-    # Обязательно добавьте await в начале строки
     await db.register_user(
     user_id=message.from_user.id,
     username=message.from_user.username,
@@ -138,7 +137,6 @@ async def choose_budget_and_ask_line(callback: types.CallbackQuery, state: FSMCo
             callback_data=f"line_{line}"  # Передаем цвет ветки
         ))
     
-    builder.add(types.InlineKeyboardButton(text="Везде 🌍", callback_data="metro_skip"))
     builder.adjust(1)  # Вертикальный столбик
 
     # Переводим пользователя в состояние ожидания ВЕТКИ
