@@ -1,8 +1,3 @@
-import os
-# Принудительно очищаем системные прокси из памяти бота перед стартом
-os.environ.pop('HTTP_PROXY', None)
-os.environ.pop('HTTPS_PROXY', None)
-os.environ.pop('ALL_PROXY', None)
 import asyncio
 import os
 import re
@@ -78,10 +73,10 @@ async def start_handler(message: types.Message):
 async def search_start(message: types.Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     
-    # Меняем "search_restaurant" на "category_ресторан" (или "category_рестораны" — проверьте, как в вашей БД)
+    # Меняем "search_restaurant" на "category_ресторан" 
     builder.add(types.InlineKeyboardButton(text="🍴 Рестораны", callback_data="category_ресторан"))
     
-    # Меняем "search_cafe" на "category_кофейня", так как в ТЕСТЕ 1 из БД вывелось именно слово 'кофейня'
+    # Меняем "search_cafe" на "category_кофейня"
     builder.add(types.InlineKeyboardButton(text="☕️ Кофейни", callback_data="category_кофейня"))
     
     await state.set_state(SearchStates.waiting_for_category)
