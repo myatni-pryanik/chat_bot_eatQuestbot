@@ -24,13 +24,17 @@ def register_user(user_id: int, username: str, full_name: str):
     # upsert обновит данные, если ID уже есть, или создаст новую строку
     supabase.table("users").upsert(data).execute()
 
-def get_places(category: str, budget: int = None, metro_id: int = None, cuisine_id: int = None):
+def get_places(category: str, budget: str = None, metro_id: int = None, cuisine_id: int = None):
     """Получает список заведений по категории и фильтрам"""
     try:
-        # Базовый запрос: выбираем активные заведения нужной категории
-        query = supabase.table("places").select("*, metro_stations(name), cuisines(name)").eq("category", category).eq("is_active", True)
+        category = category.strip()
+       
+        query = (
+            supabase.table("places")
+            .select("*, metro_id(*), cuisine_id(*)")
+            .ilike("category", f"%{category}%")
+        )
         
-        # Добавляем фильтры, если они переданы
         if budget:
             query = query.eq("budget_level", budget)
         if metro_id:
@@ -41,8 +45,9 @@ def get_places(category: str, budget: int = None, metro_id: int = None, cuisine_
         response = query.execute()
         return response.data
     except Exception as e:
-        print(f"❌ Ошибка при получении мест: {e}")
+        print(f"❌ Ошибка при получении мест из Supabase: {e}")
         return []
+
     
 # Функции для получения списков для кнопок в боте
 def get_all_metro():
